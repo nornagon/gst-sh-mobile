@@ -39,6 +39,8 @@
 #include "capture.h"
 #include "display.h"
 
+#include "thrqueue.h"
+
 typedef enum {
 	PREVIEW_OFF,
 	PREVIEW_ON
@@ -72,24 +74,26 @@ struct _GstSHVideoCapEnc {
 
 	pthread_t enc_thread;
 	pthread_t capture_thread;
-	pthread_t blit_thread;
+	/*pthread_t blit_thread;*/
 
 	void *p_display;
-	pthread_mutex_t capture_start_mutex;
+	/*pthread_mutex_t capture_start_mutex;
 	pthread_mutex_t capture_end_mutex;
 	pthread_mutex_t blit_mutex;
 	pthread_mutex_t blit_vpu_end_mutex;
 	pthread_mutex_t output_mutex;
-	pthread_mutex_t launch_mutex;
+	pthread_mutex_t launch_mutex;*/
+
+	struct Queue *full_queue;
 
 	UIOMux *uiomux;
 	int veu;
 
 	int cap_w;
 	int cap_h;
-	unsigned char *ceu_ubuf;
+	/*unsigned char *ceu_ubuf;
 	unsigned int enc_in_yaddr;
-	unsigned int enc_in_caddr;
+	unsigned int enc_in_caddr;*/
 	GstCameraPreview preview;
 
 	gboolean output_lock;
@@ -146,10 +150,12 @@ static gboolean gst_shvideo_enc_src_query(GstPad * pad, GstQuery * query);
 static int gst_shvideo_enc_get_input(SHCodecs_Encoder * encoder, void *user_data);
 static int gst_shvideo_enc_write_output(SHCodecs_Encoder * encoder,
 					unsigned char *data, int length, void *user_data);
+static int gst_shvideo_enc_release_buffer(SHCodecs_Encoder * encoder, unsigned char *y_input,
+					  unsigned char *c_input, void *user_data);
 static void gst_shvideo_enc_init_camera_encoder(GstSHVideoCapEnc * shvideoenc);
 static void *launch_camera_encoder_thread(void *data);
 static void *capture_thread(void *data);
-static void *blit_thread(void *data);
+/*static void *blit_thread(void *data);*/
 static void capture_image_cb(sh_ceu * ceu, const void *frame_data, size_t length, void *user_data);
 static GType gst_camera_preview_get_type(void);
 static gboolean gst_shvideoenc_src_event(GstPad * pad, GstEvent * event);
@@ -185,82 +191,22 @@ static GType gst_camera_preview_get_type(void)
 	return camera_preview_type;
 }
 
-/** ceu callback function
-	@param sh_ceu 
-	@param frame_data output buffer pointer
-	@param length buffer size
-	@param user_data user pointer
-*/
-static void capture_image_cb(sh_ceu * ceu, const void *frame_data, size_t length, void *user_data)
-{
-	GstSHVideoCapEnc *shvideoenc = (GstSHVideoCapEnc *) user_data;
-	unsigned int pixel_format;
-
-	pixel_format = sh_ceu_get_pixel_format(ceu);
-
-	if (pixel_format == V4L2_PIX_FMT_NV12) {
-		shvideoenc->ceu_ubuf = (unsigned char *) frame_data;
-		shcodecs_encoder_get_input_physical_addr(shvideoenc->encoder,
-							 (unsigned int *) &shvideoenc->enc_in_yaddr,
-							 (unsigned int *)
-							 &shvideoenc->enc_in_caddr);
-	}
-}
-
-static void *capture_thread(void *data)
-{
-	GstSHVideoCapEnc *enc = (GstSHVideoCapEnc *) data;
-	long long unsigned int time_diff, stamp_diff, sleep_time;
-	GstClockTime time_now;
-
-	while (1) {
-		GST_LOG_OBJECT(enc, "%s called", __func__);
-
-		/* This mutex is released by the VPU get_input call back, created locked */
-		pthread_mutex_lock(&enc->capture_start_mutex);
-
-		/* Camera sensors cannot always be set to the required frame rate. The v4l
-		   camera driver attempts to set to the requested frame rate, but if not
-		   possible it attempts to set a higher frame rate, therefore we wait... */
-		time_now = gst_clock_get_time(enc->clock);
-		if (enc->start_time_set == FALSE) {
-			enc->start_time = time_now;
-			enc->start_time_set = TRUE;
-		}
-		time_diff = GST_TIME_AS_MSECONDS(GST_CLOCK_DIFF(enc->start_time, time_now));
-		stamp_diff = 1000 * enc->fps_denominator / enc->fps_numerator;
-		enc->start_time = time_now;
-
-		if (stamp_diff > time_diff) {
-			sleep_time = stamp_diff - time_diff;
-			GST_DEBUG_OBJECT(enc, "Capture: waiting " GST_TIME_FORMAT "ms", sleep_time);
-			usleep(sleep_time * 1000);
-		} else {
-			GST_DEBUG_OBJECT(enc, "Capture: late by " GST_TIME_FORMAT "ms", time_diff-stamp_diff);
-		}
-
-
-		sh_ceu_capture_frame(enc->ainfo.ceu, capture_image_cb, enc);
-
-		/* This mutex releases the VEU copy to the VPU input buffer and the framebuffer */
-		pthread_mutex_unlock(&enc->blit_mutex);
-	}
-	return NULL;
-}
-
+#if 0
 static void *blit_thread(void *data)
 {
 	GstSHVideoCapEnc *shvideoenc = (GstSHVideoCapEnc *) data;
 	unsigned long in_yaddr;
 	unsigned long in_caddr;
+	unsigned char *ceu_ubuf;
 
 	while (1) {
 		GST_LOG_OBJECT(shvideoenc, "%s called preview %d", __func__,
 				   shvideoenc->preview);
-		pthread_mutex_lock(&shvideoenc->blit_mutex);
+		//pthread_mutex_lock(&shvideoenc->blit_mutex);
+		ceu_ubuf = (unsigned char *)queue_deq(shvideoenc->full_queue);
 
 		in_yaddr =
-			uiomux_virt_to_phys(shvideoenc->uiomux, UIOMUX_SH_VEU, shvideoenc->ceu_ubuf);
+			uiomux_virt_to_phys(shvideoenc->uiomux, UIOMUX_SH_VEU, ceu_ubuf);
 		in_caddr = in_yaddr + (shvideoenc->cap_w * shvideoenc->cap_h);
 
 		/* memory copy from ceu output buffer to vpu input buffer */
@@ -284,7 +230,7 @@ static void *blit_thread(void *data)
 				(long) shvideoenc->width,
 				(long) shvideoenc->height,
 				(long) shvideoenc->width, SHVEU_YCbCr420, SHVEU_NO_ROT);
-		pthread_mutex_unlock(&shvideoenc->blit_vpu_end_mutex);
+		//pthread_mutex_unlock(&shvideoenc->blit_vpu_end_mutex);
 
 		if (shvideoenc->preview == PREVIEW_ON) {
 			display_update(shvideoenc->p_display,
@@ -295,10 +241,11 @@ static void *blit_thread(void *data)
 					shvideoenc->width,
 					V4L2_PIX_FMT_NV12);
 		}
-		pthread_mutex_unlock(&shvideoenc->capture_end_mutex);
+		//pthread_mutex_unlock(&shvideoenc->capture_end_mutex);
 	}
 	return NULL;
 }
+#endif
 
 /** Initialize shvideoenc class plugin event handler
 	@param g_class Gclass
@@ -337,7 +284,7 @@ static void gst_shvideo_enc_dispose(GObject * object)
 	GstSHVideoCapEnc *shvideoenc = GST_SH_VIDEO_CAPENC(object);
 	GST_LOG("%s called", __func__);
 
-	pthread_mutex_lock(&shvideoenc->launch_mutex);
+	//pthread_mutex_lock(&shvideoenc->launch_mutex);
 
 	sh_ceu_stop_capturing(shvideoenc->ainfo.ceu);
 
@@ -357,14 +304,16 @@ static void gst_shvideo_enc_dispose(GObject * object)
 
 	pthread_cancel(shvideoenc->enc_thread);
 	pthread_cancel(shvideoenc->capture_thread);
-	pthread_cancel(shvideoenc->blit_thread);
+	/*pthread_cancel(shvideoenc->blit_thread);*/
 
-	pthread_mutex_destroy(&shvideoenc->capture_start_mutex);
+	/*pthread_mutex_destroy(&shvideoenc->capture_start_mutex);
 	pthread_mutex_destroy(&shvideoenc->capture_end_mutex);
 	pthread_mutex_destroy(&shvideoenc->blit_mutex);
 	pthread_mutex_destroy(&shvideoenc->blit_vpu_end_mutex);
 	pthread_mutex_destroy(&shvideoenc->output_mutex);
-	pthread_mutex_destroy(&shvideoenc->launch_mutex);
+	pthread_mutex_destroy(&shvideoenc->launch_mutex);*/
+
+	queue_destroy(shvideoenc->full_queue);
 
 	G_OBJECT_CLASS(parent_class)->dispose(object);
 }
@@ -450,12 +399,16 @@ static void gst_shvideo_enc_init(GstSHVideoCapEnc * shvideoenc, GstSHVideoCapEnc
 	shvideoenc->libshcodecs_stop = FALSE;
 	shvideoenc->enc_thread = 0;
 
+	shvideoenc->full_queue = queue_init();
+
+	/*
 	pthread_mutex_init(&shvideoenc->launch_mutex, NULL);
 	pthread_mutex_init(&shvideoenc->capture_start_mutex, NULL);
 	pthread_mutex_init(&shvideoenc->capture_end_mutex, NULL);
 	pthread_mutex_init(&shvideoenc->blit_mutex, NULL);
 	pthread_mutex_init(&shvideoenc->blit_vpu_end_mutex, NULL);
 	pthread_mutex_init(&shvideoenc->output_mutex, NULL);
+	*/
 
 	shvideoenc->format = SHCodecs_Format_NONE;
 	shvideoenc->out_caps = NULL;
@@ -612,6 +565,80 @@ gst_shvideo_enc_get_property(GObject * object, guint prop_id, GValue * value, GP
 	}
 }
 
+/******************
+ * CAPTURE THREAD *
+ ******************/
+
+/** ceu callback function
+ * received a full frame from the camera
+	@param sh_ceu 
+	@param frame_data input buffer pointer
+	@param length buffer size
+	@param user_data gstshvideocapenc
+*/
+static void capture_image_cb(sh_ceu * ceu, const void *frame_data, size_t length, void *user_data)
+{
+	GstSHVideoCapEnc *shvideoenc = (GstSHVideoCapEnc *) user_data;
+	unsigned int pixel_format;
+
+	pixel_format = sh_ceu_get_pixel_format(ceu);
+
+	if (pixel_format == V4L2_PIX_FMT_NV12) {
+		queue_enq(shvideoenc->full_queue, (void*)frame_data);
+		/*shvideoenc->ceu_ubuf = (unsigned char *) frame_data;
+		shcodecs_encoder_get_input_physical_addr(shvideoenc->encoder,
+							 (unsigned int *) &shvideoenc->enc_in_yaddr,
+							 (unsigned int *)
+							 &shvideoenc->enc_in_caddr);*/
+	}
+}
+
+static void *capture_thread(void *data)
+{
+	GstSHVideoCapEnc *enc = (GstSHVideoCapEnc *) data;
+	long long unsigned int time_diff, stamp_diff, sleep_time;
+	GstClockTime time_now;
+
+	while (1) {
+		GST_LOG_OBJECT(enc, "%s called", __func__);
+
+		/* This mutex is released by the VPU get_input call back, created locked */
+		//pthread_mutex_lock(&enc->capture_start_mutex);
+
+		/* Camera sensors cannot always be set to the required frame rate. The v4l
+		   camera driver attempts to set to the requested frame rate, but if not
+		   possible it attempts to set a higher frame rate, therefore we wait... */
+		time_now = gst_clock_get_time(enc->clock);
+		if (enc->start_time_set == FALSE) {
+			enc->start_time = time_now;
+			enc->start_time_set = TRUE;
+		}
+		time_diff = GST_TIME_AS_MSECONDS(GST_CLOCK_DIFF(enc->start_time, time_now));
+		stamp_diff = 1000 * enc->fps_denominator / enc->fps_numerator;
+		enc->start_time = time_now;
+
+		if (stamp_diff > time_diff) {
+			sleep_time = stamp_diff - time_diff;
+			GST_DEBUG_OBJECT(enc, "Capture: waiting " GST_TIME_FORMAT "ms", sleep_time);
+			usleep(sleep_time * 1000);
+		} else {
+			GST_DEBUG_OBJECT(enc, "Capture: late by " GST_TIME_FORMAT "ms", time_diff-stamp_diff);
+		}
+
+
+		sh_ceu_capture_frame(enc->ainfo.ceu, capture_image_cb, enc);
+
+		/* This mutex releases the VEU copy to the VPU input buffer and the framebuffer */
+		//pthread_mutex_unlock(&enc->blit_mutex);
+	}
+	return NULL;
+}
+
+
+/******************
+ * ENCODER THREAD *
+ ******************/
+
 /** Callback function for the encoder input
 	@param encoder shcodecs encoder
 	@param user_data Gstreamer SH encoder object
@@ -620,11 +647,32 @@ gst_shvideo_enc_get_property(GObject * object, guint prop_id, GValue * value, GP
 static int gst_shvideo_enc_get_input(SHCodecs_Encoder * encoder, void *user_data)
 {
 	GstSHVideoCapEnc *shvideoenc = (GstSHVideoCapEnc *) user_data;
+	unsigned char *ceu_ubuf;
+	unsigned long y_input, c_input;
 	GST_LOG_OBJECT(shvideoenc, "%s called", __func__);
 
+	/*
 	pthread_mutex_lock(&shvideoenc->capture_end_mutex);	//This mutex is created unlocked, so the first time it falls through
 	pthread_mutex_unlock(&shvideoenc->capture_start_mutex);	//Start the next capture, then return to the Encoder  
 	pthread_mutex_lock(&shvideoenc->blit_vpu_end_mutex);	//wait until the VEU has copied the data to the VPU input buffer
+	*/
+
+	ceu_ubuf = (unsigned char *)queue_deq(shvideoenc->full_queue);
+	y_input = uiomux_virt_to_phys(shvideoenc->uiomux, UIOMUX_SH_VEU, ceu_ubuf);
+	fprintf(stderr, "\n\n\e[31;1m0x%lx\e[0m\n\n", y_input);
+	c_input = y_input + (shvideoenc->cap_w * shvideoenc->cap_h);
+	shcodecs_encoder_set_input_physical_addr(encoder, (unsigned int *)y_input, (unsigned int *)c_input);
+
+	if (shvideoenc->preview == PREVIEW_ON) {
+		display_update(shvideoenc->p_display,
+				y_input,
+				c_input,
+				shvideoenc->width,
+				shvideoenc->height,
+				shvideoenc->width,
+				V4L2_PIX_FMT_NV12);
+	}
+
 	GST_LOG_OBJECT(shvideoenc, "%s end", __func__);
 
 	if (shvideoenc->libshcodecs_stop == TRUE)
@@ -648,7 +696,7 @@ gst_shvideo_enc_write_output(SHCodecs_Encoder * encoder,
 	static GstBuffer *old_buf = NULL;
 	gint ret = 0;
 
-	GST_LOG_OBJECT(enc, "%s called. Got %d bytes data\n", __func__, length);
+	GST_LOG_OBJECT(enc, "%s called. Got %d bytes data", __func__, length);
 
 	if (length) {
 		int frm_delta;
@@ -677,6 +725,16 @@ gst_shvideo_enc_write_output(SHCodecs_Encoder * encoder,
 			old_buf = buf;
 		}
 	}
+	return 0;
+}
+
+static int gst_shvideo_enc_release_buffer(SHCodecs_Encoder * encoder, unsigned char *y_input,
+					  unsigned char *c_input, void *user_data)
+{
+	GstSHVideoCapEnc *enc = (GstSHVideoCapEnc *) user_data;
+	unsigned char *bufp = uiomux_phys_to_virt(enc->uiomux, UIOMUX_SH_VEU, (unsigned long)y_input);
+	GST_LOG_OBJECT(enc, "%s called, releasing %p", __func__, bufp);
+	sh_ceu_queue_buffer(enc->ainfo.ceu, bufp);
 	return 0;
 }
 
@@ -710,11 +768,13 @@ static void gst_shvideo_enc_init_camera_encoder(GstSHVideoCapEnc * shvideoenc)
 	}
 
 	/* Initalise the mutexes */
+	/*
 	pthread_mutex_lock(&shvideoenc->capture_start_mutex);
 	pthread_mutex_unlock(&shvideoenc->capture_end_mutex);
 	pthread_mutex_lock(&shvideoenc->blit_mutex);
 	pthread_mutex_lock(&shvideoenc->blit_vpu_end_mutex);
 	pthread_mutex_lock(&shvideoenc->launch_mutex);
+	*/
 
 	if (!shvideoenc->enc_thread) {
 		/* We'll have to launch the encoder in 
@@ -793,6 +853,7 @@ static void *launch_camera_encoder_thread(void *data)
 
 	shcodecs_encoder_set_input_callback(enc->encoder, gst_shvideo_enc_get_input, enc);
 	shcodecs_encoder_set_output_callback(enc->encoder, gst_shvideo_enc_write_output, enc);
+	shcodecs_encoder_set_input_release_callback(enc->encoder, gst_shvideo_enc_release_buffer, enc);
 
 	ret = GetFromCtrlFtoEncParam(enc->encoder, &enc->ainfo);
 	if (ret < 0) {
@@ -829,9 +890,9 @@ static void *launch_camera_encoder_thread(void *data)
 	if (!enc->capture_thread) {
 		pthread_create(&enc->capture_thread, NULL, capture_thread, enc);
 	}
-	if (!enc->blit_thread) {
+	/*if (!enc->blit_thread) {
 		pthread_create(&enc->blit_thread, NULL, blit_thread, enc);
-	}
+	}*/
 
 	sh_ceu_start_capturing(enc->ainfo.ceu);
 
@@ -841,7 +902,7 @@ static void *launch_camera_encoder_thread(void *data)
 
 	gst_pad_push_event(enc->srcpad, gst_event_new_eos());
 
-	pthread_mutex_unlock(&enc->launch_mutex);
+	/*pthread_mutex_unlock(&enc->launch_mutex);*/
 
 	return NULL;
 }

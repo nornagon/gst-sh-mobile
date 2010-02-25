@@ -51,6 +51,8 @@ void sh_ceu_stop_capturing(sh_ceu * ceu);
 
 void sh_ceu_capture_frame(sh_ceu * ceu, sh_process_callback cb, void *user_data);
 
+void sh_ceu_queue_buffer(sh_ceu * ceu, const void * buffer_data);
+
 /* Get the properties of the captured frames 
  * The v4l device may not support the request size
  */

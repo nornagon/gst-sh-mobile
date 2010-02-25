@@ -34,6 +34,7 @@
 struct buffer {
 	void *start;
 	size_t length;
+	struct v4l2_buffer v4l2buf;
 };
 
 static void errno_exit(const char *s)
@@ -92,9 +93,10 @@ static int read_frame(sh_ceu * ceu, sh_process_callback cb, void *user_data)
 			}
 		}
 		assert(buf.index < ceu->n_buffers);
+		memcpy(&ceu->buffers[buf.index].v4l2buf, &buf, sizeof(struct v4l2_buffer));
 		cb(ceu, ceu->buffers[buf.index].start, ceu->buffers[buf.index].length, user_data);
-		if (-1 == xioctl(ceu->fd, VIDIOC_QBUF, &buf))
-			errno_exit("VIDIOC_QBUF");
+		/*if (-1 == xioctl(ceu->fd, VIDIOC_QBUF, &buf))
+			errno_exit("VIDIOC_QBUF");*/
 		break;
 
 	case IO_METHOD_USERPTR:
@@ -122,12 +124,30 @@ static int read_frame(sh_ceu * ceu, sh_process_callback cb, void *user_data)
 				break;
 		}
 		assert(i < ceu->n_buffers);
+		memcpy(&ceu->buffers[i].v4l2buf, &buf, sizeof(struct v4l2_buffer));
 		cb(ceu, (void *) buf.m.userptr, buf.length, user_data);
-		if (-1 == xioctl(ceu->fd, VIDIOC_QBUF, &buf))
-			errno_exit("VIDIOC_QBUF");
+		/*if (-1 == xioctl(ceu->fd, VIDIOC_QBUF, &buf))
+			errno_exit("VIDIOC_QBUF");*/
 		break;
 	}
 	return 1;
+}
+
+void sh_ceu_queue_buffer(sh_ceu * ceu, const void * buffer_data)
+{
+	int i;
+
+	for (i = 0; i < ceu->n_buffers; ++i) {
+		if (ceu->buffers[i].start == buffer_data) {
+			if (-1 == xioctl(ceu->fd, VIDIOC_QBUF, &ceu->buffers[i].v4l2buf))
+				errno_exit("VIDIOC_QBUF");
+			break;
+		}
+	}
+	if (i == ceu->n_buffers) {
+		fprintf(stderr, "tried to release a bad buffer, %p\n", buffer_data);
+		exit(EXIT_FAILURE);
+	}
 }
 
 
@@ -499,7 +519,7 @@ static void open_device(sh_ceu * ceu)
 		exit(EXIT_FAILURE);
 	}
 
-	ceu->fd = open(ceu->dev_name, O_RDWR /* required */  | O_NONBLOCK, 0);
+	ceu->fd = open(ceu->dev_name, O_RDWR /* required */  /*| O_NONBLOCK*/, 0);
 
 	if (-1 == ceu->fd) {
 		fprintf(stderr, "Cannot open '%s': %d, %s\n", ceu->dev_name, errno,

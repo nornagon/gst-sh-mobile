@@ -3,7 +3,7 @@ plugin_LTLIBRARIES = libgstshvideo.la
 AM_CFLAGS = -I $(srcdir)
 
 libgstshvideo_la_SOURCES = gstshvideoplugin.c gstshvideodec.c gstshvideoenc.c gstshvideosink.c gstshvideocapenc.c \
-	ControlFileUtil.c gstshvideobuffer.c display.c capture.c
+	ControlFileUtil.c gstshvideobuffer.c display.c capture.c thrqueue.c
 
 libgstshvideo_la_CFLAGS = $(GST_CFLAGS) $(GST_PLUGINS_BASE_CFLAGS) \
 	$(SHCODECS_CFLAGS) $(SHVEU_CFLAGS) $(UIOMUX_CFLAGS)
@@ -20,4 +20,5 @@ noinst_HEADERS = \
 	gstshvideocapenc.h \
 	gstshvideodec.h \
 	gstshvideoenc.h \
-	display.h
+	display.h \
+	thrqueue.h
