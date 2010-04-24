@@ -84,6 +84,7 @@ struct _GstSHVideoCapEnc {
 	pthread_mutex_t blit_vpu_end_mutex;
 	pthread_mutex_t output_mutex;
 	pthread_mutex_t launch_mutex;*/
+	pthread_mutex_t ceu_capturing;
 
 	struct Queue *full_queue;
 
@@ -229,26 +230,40 @@ static void gst_shvideo_enc_dispose(GObject * object)
 	GstSHVideoCapEnc *shvideoenc = GST_SH_VIDEO_CAPENC(object);
 	GST_LOG("%s called", __func__);
 
+	pthread_mutex_lock(&shvideoenc->ceu_capturing);
+	GST_LOG("capture_stop_capturing()");
+	capture_stop_capturing(shvideoenc->ainfo.ceu);
+	GST_LOG_OBJECT(shvideoenc, "closing ceu...");
+	capture_close(shvideoenc->ainfo.ceu);
+	GST_LOG_OBJECT(shvideoenc, "ceu closed.");
+	pthread_mutex_unlock(&shvideoenc->ceu_capturing);
+
 	//pthread_mutex_lock(&shvideoenc->launch_mutex);
 
-	capture_stop_capturing(shvideoenc->ainfo.ceu);
-
 	if (shvideoenc->encoder != NULL) {
+		GST_LOG_OBJECT(shvideoenc, "closing encoder");
 		shcodecs_encoder_close(shvideoenc->encoder);
+		GST_LOG_OBJECT(shvideoenc, "encoder closed");
 		shvideoenc->encoder = NULL;
 	}
+	GST_LOG_OBJECT(shvideoenc, "pthread_cancel(enc_thread)");
+	pthread_cancel(shvideoenc->enc_thread);
 
 	if (shvideoenc->preview == PREVIEW_ON) {
+		GST_LOG_OBJECT(shvideoenc, "closing display");
 		display_close(shvideoenc->p_display);
+		GST_LOG_OBJECT(shvideoenc, "display closed");
 	}
 
+	GST_LOG_OBJECT(shvideoenc, "closing shveu");
 	shveu_close();
-	capture_close(shvideoenc->ainfo.ceu);
+	GST_LOG_OBJECT(shvideoenc, "shveu closed");
+
+	GST_LOG("pthread_cancel(capture_thread)");
+	pthread_cancel(shvideoenc->capture_thread);
 
 	uiomux_close(shvideoenc->uiomux);
 
-	pthread_cancel(shvideoenc->enc_thread);
-	pthread_cancel(shvideoenc->capture_thread);
 	/*pthread_cancel(shvideoenc->blit_thread);*/
 
 	/*pthread_mutex_destroy(&shvideoenc->capture_start_mutex);
@@ -257,10 +272,17 @@ static void gst_shvideo_enc_dispose(GObject * object)
 	pthread_mutex_destroy(&shvideoenc->blit_vpu_end_mutex);
 	pthread_mutex_destroy(&shvideoenc->output_mutex);
 	pthread_mutex_destroy(&shvideoenc->launch_mutex);*/
+	pthread_mutex_destroy(&shvideoenc->ceu_capturing);
 
+	while (!queue_empty(shvideoenc->full_queue))
+		queue_deq(shvideoenc->full_queue);
 	queue_destroy(shvideoenc->full_queue);
 
+	GST_LOG("done destroying stuff, calling base.dispose()");
+
 	G_OBJECT_CLASS(parent_class)->dispose(object);
+
+	GST_LOG("complete!");
 }
 
 
@@ -354,6 +376,8 @@ static void gst_shvideo_enc_init(GstSHVideoCapEnc * shvideoenc, GstSHVideoCapEnc
 	pthread_mutex_init(&shvideoenc->blit_vpu_end_mutex, NULL);
 	pthread_mutex_init(&shvideoenc->output_mutex, NULL);
 	*/
+
+	pthread_mutex_init(&shvideoenc->ceu_capturing, NULL);
 
 	shvideoenc->format = SHCodecs_Format_NONE;
 	shvideoenc->out_caps = NULL;
@@ -512,6 +536,7 @@ static void capture_image_cb(capture * ceu, const void *frame_data, size_t lengt
 {
 	GstSHVideoCapEnc *shvideoenc = (GstSHVideoCapEnc *) user_data;
 	unsigned int pixel_format;
+	GST_LOG_OBJECT(shvideoenc, "got a frame from the ceu");
 
 	pixel_format = capture_get_pixel_format(ceu);
 
@@ -532,7 +557,7 @@ static void *capture_thread(void *data)
 	long long unsigned int time_diff, stamp_diff, sleep_time;
 	GstClockTime time_now;
 
-	while (1) {
+	while (!enc->output_lock) {
 		GST_LOG_OBJECT(enc, "%s called", __func__);
 
 		/* This mutex is released by the VPU get_input call back, created locked */
@@ -559,7 +584,15 @@ static void *capture_thread(void *data)
 		}
 
 
+		pthread_mutex_lock(&enc->ceu_capturing);
+		GST_LOG_OBJECT(enc, "capturing frame...");
+		if (enc->ainfo.ceu->fd < 0) {
+			GST_LOG_OBJECT(enc, "ceu closed, exiting...");
+			return NULL;
+		}
 		capture_capture_frame(enc->ainfo.ceu, capture_image_cb, enc);
+		GST_LOG_OBJECT(enc, "done capturing a frame.");
+		pthread_mutex_unlock(&enc->ceu_capturing);
 
 		/* This mutex releases the VEU copy to the VPU input buffer and the framebuffer */
 		//pthread_mutex_unlock(&enc->blit_mutex);

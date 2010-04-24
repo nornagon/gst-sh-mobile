@@ -1,6 +1,13 @@
 - make gst-sh-video-cap send NEWSEGMENT events.
-- rtsp server only works for the first connection
 - libtool is broken by default (have to copy a different version of 'libtool'
-	to compile)
+	to compile):
+
+/bin/sh ../../libtool  --tag=CC --tag=disable-static  --mode=compile ccache gcc -DHAVE_CONFIG_H -I. -I../..    -I../../gst-libs -I../../gst-libs -pthread -I/usr/include/gstreamer-0.10 -I/usr/include/glib-2.0 -I/usr/lib/glib-2.0/include -I/usr/include/libxml2   -Wall -Wdeclaration-after-statement -Wvla -Werror -fno-strict-aliasing     -DGST_DISABLE_DEPRECATED -pthread -I/usr/include/gstreamer-0.10 -I/usr/include/glib-2.0 -I/usr/lib/glib-2.0/include -I/usr/include/libxml2   -I/usr/local/include   -I/usr/local/include   -I/usr/local/include   -g -O2 -MT libgstshvideo_la-thrqueue.lo -MD -MP -MF .deps/libgstshvideo_la-thrqueue.Tpo -c -o libgstshvideo_la-thrqueue.lo `test -f 'thrqueue.c' || echo './'`thrqueue.c
+libtool: Version mismatch error.  This is libtool 2.2.6b Debian-2.2.6b-2, but the
+libtool: definition of this LT_INIT comes from libtool 2.2.6.
+libtool: You should recreate aclocal.m4 with macros from libtool 2.2.6b Debian-2.2.6b-2
+libtool: and run autoconf again.
+make[3]: *** [libgstshvideo_la-thrqueue.lo] Error 63
+	
 - capsneg is broken
 - potential race condition -- videoenc.c:463 -- needs investigation

@@ -104,6 +104,7 @@ static int read_frame(capture * ceu, sh_process_callback cb, void *user_data)
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.memory = V4L2_MEMORY_USERPTR;
 
+		fprintf(stderr, "DQBUF...\n");
 		if (-1 == xioctl(ceu->fd, VIDIOC_DQBUF, &buf)) {
 			switch (errno) {
 			case EAGAIN:
@@ -115,6 +116,7 @@ static int read_frame(capture * ceu, sh_process_callback cb, void *user_data)
 				errno_exit("VIDIOC_DQBUF");
 			}
 		}
+		fprintf(stderr, "Buf DQ'd\n");
 		for (i = 0; i < ceu->n_buffers; ++i) {
 			/* TODO Work around the kernel - it sets the buffer size incorrectly */
 			buf.length = ceu->buffers[i].length;
