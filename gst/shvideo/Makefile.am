@@ -15,6 +15,7 @@ libgstshvideo_la_LIBTOOLFLAGS = --tag=disable-static
 
 noinst_HEADERS = \
 	avcbencsmp.h \
+	thrqueue.h \
 	capture.h \
 	ControlFileUtil.h \
 	gstshvideocapenc.h \

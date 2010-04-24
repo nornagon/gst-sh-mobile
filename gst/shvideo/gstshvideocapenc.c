@@ -71,6 +71,7 @@ struct _GstSHVideoCapEnc {
 	GstClock *clock;
 	gboolean start_time_set;
 	GstClockTime start_time;
+	GstBuffer *output_buf;
 
 	pthread_t enc_thread;
 	pthread_t capture_thread;
@@ -156,7 +157,7 @@ static void gst_shvideo_enc_init_camera_encoder(GstSHVideoCapEnc * shvideoenc);
 static void *launch_camera_encoder_thread(void *data);
 static void *capture_thread(void *data);
 /*static void *blit_thread(void *data);*/
-static void capture_image_cb(sh_ceu * ceu, const void *frame_data, size_t length, void *user_data);
+static void capture_image_cb(capture * ceu, const void *frame_data, size_t length, void *user_data);
 static GType gst_camera_preview_get_type(void);
 static gboolean gst_shvideoenc_src_event(GstPad * pad, GstEvent * event);
 static GstStateChangeReturn gst_shvideo_enc_change_state(GstElement *
@@ -190,62 +191,6 @@ static GType gst_camera_preview_get_type(void)
 	}
 	return camera_preview_type;
 }
-
-#if 0
-static void *blit_thread(void *data)
-{
-	GstSHVideoCapEnc *shvideoenc = (GstSHVideoCapEnc *) data;
-	unsigned long in_yaddr;
-	unsigned long in_caddr;
-	unsigned char *ceu_ubuf;
-
-	while (1) {
-		GST_LOG_OBJECT(shvideoenc, "%s called preview %d", __func__,
-				   shvideoenc->preview);
-		//pthread_mutex_lock(&shvideoenc->blit_mutex);
-		ceu_ubuf = (unsigned char *)queue_deq(shvideoenc->full_queue);
-
-		in_yaddr =
-			uiomux_virt_to_phys(shvideoenc->uiomux, UIOMUX_SH_VEU, ceu_ubuf);
-		in_caddr = in_yaddr + (shvideoenc->cap_w * shvideoenc->cap_h);
-
-		/* memory copy from ceu output buffer to vpu input buffer */
-
-#if 0
-		fprintf(stderr,
-			"Resizing input data from %lu from size %ld x %ld to size %d x %d\n",
-			in_yaddr, shvideoenc->cap_w, shvideoenc->cap_h,
-			shvideoenc->width, shvideoenc->height);
-#endif
-
-		shveu_operation(shvideoenc->veu,
-				in_yaddr,
-				in_caddr,
-				shvideoenc->cap_w,
-				shvideoenc->cap_h,
-				shvideoenc->cap_w,
-				SHVEU_YCbCr420,
-				shvideoenc->enc_in_yaddr,
-				shvideoenc->enc_in_caddr,
-				(long) shvideoenc->width,
-				(long) shvideoenc->height,
-				(long) shvideoenc->width, SHVEU_YCbCr420, SHVEU_NO_ROT);
-		//pthread_mutex_unlock(&shvideoenc->blit_vpu_end_mutex);
-
-		if (shvideoenc->preview == PREVIEW_ON) {
-			display_update(shvideoenc->p_display,
-					shvideoenc->enc_in_yaddr,
-					shvideoenc->enc_in_caddr,
-					shvideoenc->width,
-					shvideoenc->height,
-					shvideoenc->width,
-					V4L2_PIX_FMT_NV12);
-		}
-		//pthread_mutex_unlock(&shvideoenc->capture_end_mutex);
-	}
-	return NULL;
-}
-#endif
 
 /** Initialize shvideoenc class plugin event handler
 	@param g_class Gclass
@@ -286,7 +231,7 @@ static void gst_shvideo_enc_dispose(GObject * object)
 
 	//pthread_mutex_lock(&shvideoenc->launch_mutex);
 
-	sh_ceu_stop_capturing(shvideoenc->ainfo.ceu);
+	capture_stop_capturing(shvideoenc->ainfo.ceu);
 
 	if (shvideoenc->encoder != NULL) {
 		shcodecs_encoder_close(shvideoenc->encoder);
@@ -298,7 +243,7 @@ static void gst_shvideo_enc_dispose(GObject * object)
 	}
 
 	shveu_close();
-	sh_ceu_close(shvideoenc->ainfo.ceu);
+	capture_close(shvideoenc->ainfo.ceu);
 
 	uiomux_close(shvideoenc->uiomux);
 
@@ -422,6 +367,7 @@ static void gst_shvideo_enc_init(GstSHVideoCapEnc * shvideoenc, GstSHVideoCapEnc
 	shvideoenc->cntl_flg = 0;
 	shvideoenc->preview_flg = 0;
 	shvideoenc->start_time_set = FALSE;
+	shvideoenc->output_buf = NULL;
 }
 
 
@@ -488,15 +434,11 @@ static gboolean gst_shvideoenc_src_event(GstPad * pad, GstEvent * event)
 
 	switch (GST_EVENT_TYPE(event)) {
 	case GST_EVENT_LATENCY:
-		{
-			ret = TRUE;
-			break;
-		}
+		ret = TRUE;
+		break;
 	default:
-		{
-			ret = FALSE;
-			break;
-		}
+		ret = FALSE;
+		break;
 	}
 	return ret;
 }
@@ -518,22 +460,16 @@ gst_shvideo_enc_set_property(GObject * object, guint prop_id,
 	GST_LOG("%s called", __func__);
 	switch (prop_id) {
 	case PROP_CNTL_FILE:
-		{
-			strcpy(shvideoenc->ainfo.ctrl_file_name_buf, g_value_get_string(value));
-			shvideoenc->cntl_flg = 1;
-			break;
-		}
+		strcpy(shvideoenc->ainfo.ctrl_file_name_buf, g_value_get_string(value));
+		shvideoenc->cntl_flg = 1;
+		break;
 	case PROP_PREVIEW:
-		{
-			shvideoenc->preview = g_value_get_enum(value);
-			shvideoenc->preview_flg = 1;
-			break;
-		}
+		shvideoenc->preview = g_value_get_enum(value);
+		shvideoenc->preview_flg = 1;
+		break;
 	default:
-		{
-			G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
-			break;
-		}
+		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
+		break;
 	}
 }
 
@@ -551,15 +487,11 @@ gst_shvideo_enc_get_property(GObject * object, guint prop_id, GValue * value, GP
 	GST_LOG("%s called", __func__);
 	switch (prop_id) {
 	case PROP_CNTL_FILE:
-		{
-			g_value_set_string(value, shvideoenc->ainfo.ctrl_file_name_buf);
-			break;
-		}
+		g_value_set_string(value, shvideoenc->ainfo.ctrl_file_name_buf);
+		break;
 	case PROP_PREVIEW:
-		{
-			g_value_set_enum(value, shvideoenc->preview);
-			break;
-		}
+		g_value_set_enum(value, shvideoenc->preview);
+		break;
 	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
 	}
@@ -571,17 +503,17 @@ gst_shvideo_enc_get_property(GObject * object, guint prop_id, GValue * value, GP
 
 /** ceu callback function
  * received a full frame from the camera
-	@param sh_ceu 
+	@param capture 
 	@param frame_data input buffer pointer
 	@param length buffer size
 	@param user_data gstshvideocapenc
 */
-static void capture_image_cb(sh_ceu * ceu, const void *frame_data, size_t length, void *user_data)
+static void capture_image_cb(capture * ceu, const void *frame_data, size_t length, void *user_data)
 {
 	GstSHVideoCapEnc *shvideoenc = (GstSHVideoCapEnc *) user_data;
 	unsigned int pixel_format;
 
-	pixel_format = sh_ceu_get_pixel_format(ceu);
+	pixel_format = capture_get_pixel_format(ceu);
 
 	if (pixel_format == V4L2_PIX_FMT_NV12) {
 		queue_enq(shvideoenc->full_queue, (void*)frame_data);
@@ -592,6 +524,7 @@ static void capture_image_cb(sh_ceu * ceu, const void *frame_data, size_t length
 							 &shvideoenc->enc_in_caddr);*/
 	}
 }
+
 
 static void *capture_thread(void *data)
 {
@@ -626,7 +559,7 @@ static void *capture_thread(void *data)
 		}
 
 
-		sh_ceu_capture_frame(enc->ainfo.ceu, capture_image_cb, enc);
+		capture_capture_frame(enc->ainfo.ceu, capture_image_cb, enc);
 
 		/* This mutex releases the VEU copy to the VPU input buffer and the framebuffer */
 		//pthread_mutex_unlock(&enc->blit_mutex);
@@ -693,38 +626,38 @@ gst_shvideo_enc_write_output(SHCodecs_Encoder * encoder,
 {
 	GstSHVideoCapEnc *enc = (GstSHVideoCapEnc *) user_data;
 	GstBuffer *buf = NULL;
-	static GstBuffer *old_buf = NULL;
 	gint ret = 0;
+	int frm_delta;
 
 	GST_LOG_OBJECT(enc, "%s called. Got %d bytes data", __func__, length);
 
-	if (length) {
-		int frm_delta;
+	if (length <= 0)
+		return 0;
 
-		buf = gst_buffer_new();
-		gst_buffer_set_data(buf, data, length);
+	buf = gst_buffer_new();
+	gst_buffer_set_data(buf, data, length);
 
-		if(old_buf != NULL){		
-			buf = gst_buffer_join(old_buf, buf);
-			old_buf = NULL;
-		}
-		frm_delta = shcodecs_encoder_get_frame_num_delta(enc->encoder);
-
-		if(frm_delta){
-			GST_BUFFER_DURATION(buf) =
-			frm_delta * enc->fps_denominator * 1000 * GST_MSECOND / enc->fps_numerator;
-			GST_BUFFER_TIMESTAMP(buf) = enc->frame_number * GST_BUFFER_DURATION(buf);
-			GST_BUFFER_OFFSET(buf) = enc->frame_number;
-			enc->frame_number += frm_delta;
-			ret = gst_pad_push(enc->srcpad, buf);
-			if (ret != GST_FLOW_OK) {
-				GST_DEBUG_OBJECT(enc, "pad_push failed: %s", gst_flow_get_name(ret));
-				return -1;
-			}
-		} else {
-			old_buf = buf;
-		}
+	if (enc->output_buf != NULL){		
+		buf = gst_buffer_join(enc->output_buf, buf);
+		enc->output_buf = NULL;
 	}
+	frm_delta = shcodecs_encoder_get_frame_num_delta(enc->encoder);
+
+	if (frm_delta){
+		GST_BUFFER_DURATION(buf) =
+			frm_delta * enc->fps_denominator * 1000 * GST_MSECOND / enc->fps_numerator;
+		GST_BUFFER_TIMESTAMP(buf) = enc->frame_number * GST_BUFFER_DURATION(buf);
+		GST_BUFFER_OFFSET(buf) = enc->frame_number;
+		enc->frame_number += frm_delta;
+		ret = gst_pad_push(enc->srcpad, buf);
+		if (ret != GST_FLOW_OK) {
+			GST_DEBUG_OBJECT(enc, "pad_push failed: %s", gst_flow_get_name(ret));
+			return -1;
+		}
+	} else {
+		enc->output_buf = buf;
+	}
+
 	return 0;
 }
 
@@ -734,7 +667,7 @@ static int gst_shvideo_enc_release_buffer(SHCodecs_Encoder * encoder, unsigned c
 	GstSHVideoCapEnc *enc = (GstSHVideoCapEnc *) user_data;
 	unsigned char *bufp = uiomux_phys_to_virt(enc->uiomux, UIOMUX_SH_VEU, (unsigned long)y_input);
 	GST_LOG_OBJECT(enc, "%s called, releasing %p", __func__, bufp);
-	sh_ceu_queue_buffer(enc->ainfo.ceu, bufp);
+	capture_queue_buffer(enc->ainfo.ceu, bufp);
 	return 0;
 }
 
@@ -842,11 +775,11 @@ static void *launch_camera_encoder_thread(void *data)
 	}
 
 	/* ceu open */
-	enc->ainfo.ceu = sh_ceu_open(enc->ainfo.input_file_name_buf,
+	enc->ainfo.ceu = capture_open(enc->ainfo.input_file_name_buf,
 					 enc->ainfo.xpic, enc->ainfo.ypic, IO_METHOD_USERPTR,
 					 enc->uiomux);
-	enc->cap_w = sh_ceu_get_width(enc->ainfo.ceu);
-	enc->cap_h = sh_ceu_get_height(enc->ainfo.ceu);
+	enc->cap_w = capture_get_width(enc->ainfo.ceu);
+	enc->cap_h = capture_get_height(enc->ainfo.ceu);
 	GST_DEBUG_OBJECT(enc, "Capturing at %dx%d\n", enc->cap_w, enc->cap_h);
 
 	enc->encoder = shcodecs_encoder_init(enc->width, enc->height, enc->format);
@@ -894,7 +827,7 @@ static void *launch_camera_encoder_thread(void *data)
 		pthread_create(&enc->blit_thread, NULL, blit_thread, enc);
 	}*/
 
-	sh_ceu_start_capturing(enc->ainfo.ceu);
+	capture_start_capturing(enc->ainfo.ceu);
 
 	ret = shcodecs_encoder_run(enc->encoder);
 
